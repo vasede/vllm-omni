@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
+from diffusers.models.embeddings import CombinedTimestepLabelEmbeddings
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
 
@@ -15,6 +16,28 @@ logger = init_logger(__name__)
 
 _HAS_MINDIESD = find_spec("mindiesd") is not None
 
+def apply_layernorm_scale_shift(
+    layernorm: nn.LayerNorm,
+    x: torch.Tensor,
+    scale: torch.Tensor,
+    shift: torch.Tensor,
+    *,
+    fused: bool = True,
+) -> torch.Tensor:
+    if fused and _HAS_MINDIESD and x.device.type == "npu":
+        try:
+            from mindiesd import layernorm_scale_shift
+
+            return layernorm_scale_shift(layernorm, x, scale, shift, fused=True)
+        except ImportError as e:
+            logger.warning_once(f"mindiesd import failed, falling back to native layernorm: {e}")
+
+    if scale.dim() == 2:
+        scale = scale[:, None]
+    if shift.dim() == 2:
+        shift = shift[:, None]
+
+    return layernorm(x) * (1 + scale) + shift
 
 class AdaLayerNorm(CustomOp):
     """
@@ -227,3 +250,75 @@ class AdaLayerNormContinuous(nn.Module):
         scale, shift = torch.chunk(emb, 2, dim=1)
         x = self.norm(x) * (1 + scale)[:, None, :] + shift[:, None, :]
         return x
+
+
+class AdaLayerNormContinuous(nn.Module):
+    def __init__(
+        self,
+        embedding_dim: int,
+        conditioning_embedding_dim: int,
+        elementwise_affine: bool = True,
+        eps: float = 1e-5,
+        bias: bool = True,
+        norm_type: str = "layer_norm",
+        fused: bool = True,
+    ) -> None:
+        super().__init__()
+        self.silu = nn.SiLU()
+        self.linear = nn.Linear(conditioning_embedding_dim, embedding_dim * 2, bias=bias)
+        if norm_type == "layer_norm":
+            self.norm = nn.LayerNorm(embedding_dim, eps=eps, elementwise_affine=elementwise_affine, bias=bias)
+        elif norm_type == "rms_norm":
+            self.norm = DiffusersRMSNorm(embedding_dim, eps, elementwise_affine)
+        else:
+            raise ValueError(f"unknown norm_type {norm_type}")
+        self.fused = fused
+
+    def forward(self, x: torch.Tensor, conditioning_embedding: torch.Tensor) -> torch.Tensor:
+        emb = self.linear(self.silu(conditioning_embedding).to(x.dtype))
+        scale, shift = emb.chunk(2, dim=1)
+        return apply_layernorm_scale_shift(self.norm, x, scale, shift, fused=self.fused)
+
+
+class AdaLayerNormZero(nn.Module):
+    def __init__(
+        self,
+        embedding_dim: int,
+        num_embeddings: int | None = None,
+        norm_type: str = "layer_norm",
+        bias: bool = True,
+        fused: bool = True,
+    ) -> None:
+        super().__init__()
+        if num_embeddings is not None:
+            self.emb = CombinedTimestepLabelEmbeddings(num_embeddings, embedding_dim)
+        else:
+            self.emb = None
+
+        self.silu = nn.SiLU()
+        self.linear = nn.Linear(embedding_dim, 6 * embedding_dim, bias=bias)
+        if norm_type == "layer_norm":
+            self.norm = nn.LayerNorm(embedding_dim, elementwise_affine=False, eps=1e-6)
+        elif norm_type == "fp32_layer_norm":
+            self.norm = FP32LayerNorm(embedding_dim, elementwise_affine=False, bias=False)
+        else:
+            raise ValueError(
+                f"Unsupported `norm_type` ({norm_type}) provided. Supported ones are: 'layer_norm', 'fp32_layer_norm'."
+            )
+        self.fused = fused
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        timestep: torch.Tensor | None = None,
+        class_labels: torch.LongTensor | None = None,
+        hidden_dtype: torch.dtype | None = None,
+        emb: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self.emb is not None:
+            emb = self.emb(timestep, class_labels, hidden_dtype=hidden_dtype)
+
+        emb = self.linear(self.silu(emb))
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = emb.chunk(6, dim=1)
+        x = apply_layernorm_scale_shift(self.norm, x, scale_msa, shift_msa, fused=self.fused)
+        return x, gate_msa, shift_mlp, scale_mlp, gate_mlp

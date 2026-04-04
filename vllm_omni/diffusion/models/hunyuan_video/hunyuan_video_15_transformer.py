@@ -13,7 +13,6 @@ from diffusers.models.embeddings import (
     get_1d_rotary_pos_embed,
 )
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
-from diffusers.models.normalization import AdaLayerNormContinuous, AdaLayerNormZero
 from torch import nn
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -26,6 +25,11 @@ from vllm_omni.diffusion.data import OmniDiffusionConfig
 from vllm_omni.diffusion.distributed.hsdp_utils import is_transformer_block_module
 from vllm_omni.diffusion.layers.rope import RotaryEmbedding
 from vllm_omni.diffusion.models.flux.flux_transformer import FeedForward
+from vllm_omni.diffusion.layers.adalayernorm import (
+    AdaLayerNormContinuous,
+    AdaLayerNormZero,
+    apply_layernorm_scale_shift,
+)
 
 logger = init_logger(__name__)
 
@@ -515,11 +519,10 @@ class HunyuanVideo15TransformerBlock(nn.Module):
         hidden_states = hidden_states + attn_output * gate_msa.unsqueeze(1)
         encoder_hidden_states = encoder_hidden_states + context_attn_output * c_gate_msa.unsqueeze(1)
 
-        norm_hidden_states = self.norm2(hidden_states)
-        norm_encoder_hidden_states = self.norm2_context(encoder_hidden_states)
-
-        norm_hidden_states = norm_hidden_states * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
-        norm_encoder_hidden_states = norm_encoder_hidden_states * (1 + c_scale_mlp[:, None]) + c_shift_mlp[:, None]
+        norm_hidden_states = apply_layernorm_scale_shift(self.norm2, hidden_states, scale_mlp, shift_mlp)
+        norm_encoder_hidden_states = apply_layernorm_scale_shift(
+            self.norm2_context, encoder_hidden_states, c_scale_mlp, c_shift_mlp
+        )
 
         ff_output = self.ff(norm_hidden_states)
         context_ff_output = self.ff_context(norm_encoder_hidden_states)
