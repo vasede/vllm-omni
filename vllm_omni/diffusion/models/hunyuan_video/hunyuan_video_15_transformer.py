@@ -23,13 +23,13 @@ from vllm_omni.diffusion.attention.backends.abstract import AttentionMetadata
 from vllm_omni.diffusion.attention.layer import Attention
 from vllm_omni.diffusion.data import OmniDiffusionConfig
 from vllm_omni.diffusion.distributed.hsdp_utils import is_transformer_block_module
-from vllm_omni.diffusion.layers.rope import RotaryEmbedding
-from vllm_omni.diffusion.models.flux.flux_transformer import FeedForward
 from vllm_omni.diffusion.layers.adalayernorm import (
     AdaLayerNormContinuous,
     AdaLayerNormZero,
     apply_layernorm_scale_shift,
 )
+from vllm_omni.diffusion.layers.rope import RotaryEmbedding
+from vllm_omni.diffusion.models.flux.flux_transformer import FeedForward
 
 logger = init_logger(__name__)
 
