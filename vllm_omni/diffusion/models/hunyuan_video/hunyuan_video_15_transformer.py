@@ -477,8 +477,8 @@ class HunyuanVideo15TransformerBlock(nn.Module):
         super().__init__()
         hidden_size = num_attention_heads * attention_head_dim
 
-        self.norm1 = AdaLayerNormZero(hidden_size, norm_type="layer_norm")
-        self.norm1_context = AdaLayerNormZero(hidden_size, norm_type="layer_norm")
+        self.norm1 = AdaLayerNormZero(hidden_size)
+        self.norm1_context = AdaLayerNormZero(hidden_size)
 
         self.attn = HunyuanVideo15Attention(
             query_dim=hidden_size,
