@@ -15,6 +15,7 @@ logger = init_logger(__name__)
 
 _HAS_MINDIESD = find_spec("mindiesd") is not None
 
+
 def apply_layernorm_scale_shift(
     layernorm: nn.LayerNorm,
     x: torch.Tensor,
@@ -35,6 +36,7 @@ def apply_layernorm_scale_shift(
         shift = shift[:, None]
 
     return layernorm(x) * (1 + scale) + shift
+
 
 class AdaLayerNorm(CustomOp):
     """
