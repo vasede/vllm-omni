@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
+from importlib.util import find_spec
 from typing import Any
 
 import torch
@@ -26,7 +27,6 @@ from vllm_omni.diffusion.distributed.hsdp_utils import is_transformer_block_modu
 from vllm_omni.diffusion.layers.rope import RotaryEmbedding
 from vllm_omni.diffusion.models.flux.flux_transformer import FeedForward
 from vllm_omni.platforms import current_omni_platform
-from importlib.util import find_spec
 
 try:
     if current_omni_platform.is_npu() and find_spec("mindiesd") is not None:
