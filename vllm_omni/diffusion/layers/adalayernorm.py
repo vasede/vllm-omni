@@ -4,7 +4,8 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 from diffusers.models.embeddings import CombinedTimestepLabelEmbeddings
-from diffusers.models.normalization import FP32LayerNorm, RMSNorm as DiffusersRMSNorm
+from diffusers.models.normalization import FP32LayerNorm
+from diffusers.models.normalization import RMSNorm as DiffusersRMSNorm
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
 
