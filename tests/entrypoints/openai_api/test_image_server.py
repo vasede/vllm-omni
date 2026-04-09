@@ -172,7 +172,7 @@ def test_client(mock_async_diffusion):
     app.state.diffusion_model_name = "Qwen/Qwen-Image"  # For models endpoint
     app.state.args = Namespace(
         default_sampling_params='{"0": {"num_inference_steps":4, "guidance_scale":7.5}}',
-        max_generated_image_size=4096,  # 64*64
+        max_generated_image_size=1024 * 1792,
     )
 
     return TestClient(app)
@@ -239,7 +239,7 @@ def async_omni_stage_configs_only_client():
     # AsyncOmni exposes stage_configs on the engine instance.
     app.state.args = Namespace(
         default_sampling_params='{"1": {"num_inference_steps":4, "guidance_scale":7.5}}',
-        max_generated_image_size=4096,  # 64*64
+        max_generated_image_size=1024 * 1792,
     )
     return TestClient(app)
 
@@ -384,6 +384,18 @@ def test_image_edits_async_omni_stage_configs_only(async_omni_stage_configs_only
     captured = engine.captured_sampling_params_list
     assert captured is not None
     assert len(captured) == 2
+
+
+def test_generate_images_max_size_rejected(async_omni_test_client):
+    """Test that a size exceeding max_generated_image_size returns 400."""
+    response = async_omni_test_client.post(
+        "/v1/images/generations",
+        json={
+            "prompt": "a cat",
+            "size": "2048x2048",  # 4,194,304 pixels > max_generated_image_size (1,048,576)
+        },
+    )
+    assert response.status_code == 400
 
 
 def test_generate_multiple_images(test_client):
@@ -976,12 +988,13 @@ def test_image_edit_parameter_default_single_stage(test_client):
     assert captured_sampling_params.num_inference_steps == 4
     assert captured_sampling_params.guidance_scale == 7.5
 
+    # Size exceeding max_generated_image_size (1024*1792) returns 400
     response = test_client.post(
         "/v1/images/edits",
         files=[("image", img_bytes_1)],
         data={
             "prompt": "hello world.",
-            "size": "96x96",
+            "size": "2048x2048",
         },
     )
     assert response.status_code == 400
