@@ -8,7 +8,7 @@ import torch.nn as nn
 from transformers import BatchFeature
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
-from vllm.inputs import MultiModalDataDict
+from vllm.inputs import ModalityData, MultiModalDataDict
 from vllm.model_executor.layers.layernorm import RMSNorm as VllmRMSNorm
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
@@ -27,7 +27,6 @@ from vllm.multimodal.inputs import (
 from vllm.multimodal.parse import (
     ImageEmbeddingItems,
     ImageProcessorItems,
-    ModalityData,
     ModalityDataItems,
     MultiModalDataItems,
     MultiModalDataParser,
@@ -407,6 +406,22 @@ class OmniBagelForConditionalGeneration(BagelForConditionalGeneration):
     ensuring the transferred KV cache + ropes are directly compatible with
     the DiT's denoising loop.
     """
+
+    # LoRA packed→sublayer mapping for both standard Qwen2 projections
+    # and the MoE generation-mode projections added by _install_mot_modules().
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "qkv_proj_moe_gen": [
+            "q_proj_moe_gen",
+            "k_proj_moe_gen",
+            "v_proj_moe_gen",
+        ],
+        "mlp_moe_gen.gate_up_proj": [
+            "mlp_moe_gen.gate_proj",
+            "mlp_moe_gen.up_proj",
+        ],
+    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)

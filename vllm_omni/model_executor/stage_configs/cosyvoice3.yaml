@@ -22,6 +22,12 @@ stage_args:
       mm_processor_cache_gb: 0
       skip_mm_profiling: true
       dtype: "float32"
+    default_sampling_params:
+      max_tokens: 2048
+      stop_token_ids: [6562]  # merged speech stop token (logsumexp of all 200 stop logits)
+      top_k: 25
+      top_p: 0.8
+      repetition_penalty: 1.0001  # near-identity; forces vLLM to track output_token_ids for RAS
 
   - stage_id: 1
     runtime:
@@ -39,6 +45,8 @@ stage_args:
       enable_prefix_caching: false
       skip_mm_profiling: true
       dtype: "float32"
+    default_sampling_params:
+      max_tokens: 2048
     engine_input_source: [0]
     custom_process_input_func: vllm_omni.model_executor.stage_input_processors.cosyvoice3.text2flow
     final_output: true
