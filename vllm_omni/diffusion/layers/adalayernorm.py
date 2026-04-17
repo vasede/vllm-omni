@@ -22,6 +22,7 @@ def apply_layernorm_scale_shift(
     x: torch.Tensor,
     scale: torch.Tensor,
     shift: torch.Tensor,
+    fused: bool = True,
 ) -> torch.Tensor:
     """
     Apply adaptive LayerNorm modulation.
@@ -35,7 +36,7 @@ def apply_layernorm_scale_shift(
         try:
             from mindiesd import layernorm_scale_shift
 
-            return layernorm_scale_shift(layernorm, x, scale, shift, fused=True)
+            return layernorm_scale_shift(layernorm, x, scale, shift, fused=fused)
         except ImportError as e:
             logger.warning_once(f"mindiesd import failed, falling back to native layernorm: {e}")
 
