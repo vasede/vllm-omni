@@ -437,6 +437,7 @@ def initialize_diffusion_stage(
     stage_cfg: Any,
     metadata: StageMetadata,
     batch_size: int = 1,
+    use_inline: bool = False,
 ) -> Any:
     """Build a diffusion stage client.
 
@@ -447,9 +448,11 @@ def initialize_diffusion_stage(
         batch_size: Maximum number of requests to batch together in the
             diffusion engine.  Passed through to ``StageDiffusionClient``
             and ultimately to ``AsyncOmniDiffusion``.
+        use_inline: If True, uses the inline diffusion client instead of subprocess.
     """
+    from vllm_omni.diffusion.stage_diffusion_client import create_diffusion_client
+
     from vllm_omni.diffusion.data import OmniDiffusionConfig
-    from vllm_omni.diffusion.stage_diffusion_client import StageDiffusionClient
 
     od_config = OmniDiffusionConfig.from_kwargs(
         model=model,
@@ -457,7 +460,7 @@ def initialize_diffusion_stage(
     )
     if metadata.cfg_kv_collect_func is not None:
         od_config.cfg_kv_collect_func = metadata.cfg_kv_collect_func
-    return StageDiffusionClient(model, od_config, metadata, batch_size=batch_size)
+    return create_diffusion_client(model, od_config, metadata, batch_size=batch_size, use_inline=use_inline)
 
 
 def close_started_llm_stage(started: StartedLlmStage) -> None:

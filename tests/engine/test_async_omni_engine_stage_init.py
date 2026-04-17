@@ -70,6 +70,66 @@ def test_initialize_stages_restores_device_visibility_after_diffusion_init(monke
         else:
             os.environ[env_var] = old_env
 
+def test_initialize_stages_uses_inline_diffusion_client_for_single_stage(monkeypatch):
+    """Single-stage diffusion init should request the inline client path."""
+    import vllm_omni.engine.async_omni_engine as engine_mod
+    from vllm_omni.platforms import current_omni_platform
+
+    engine = object.__new__(AsyncOmniEngine)
+    engine.model = "dummy-model"
+    engine.config_path = "dummy-config"
+    engine.num_stages = 1
+    engine.async_chunk = False
+    engine.diffusion_batch_size = 1
+    engine.stage_configs = [types.SimpleNamespace(stage_id=0, stage_type="diffusion")]
+
+    env_var = current_omni_platform.device_control_env_var
+    old_env = os.environ.get(env_var)
+    os.environ[env_var] = "0"
+
+    metadata = types.SimpleNamespace(
+        stage_id=0,
+        stage_type="diffusion",
+        runtime_cfg={"devices": "0"},
+        prompt_expand_func=None,
+    )
+    captured_use_inline = None
+    diffusion_client = types.SimpleNamespace(is_comprehension=False)
+
+    monkeypatch.setattr(engine_mod, "prepare_engine_environment", lambda: None)
+    monkeypatch.setattr(engine_mod, "load_omni_transfer_config_for_model", lambda *_: None)
+    monkeypatch.setattr(engine_mod, "extract_stage_metadata", lambda _cfg: metadata)
+    monkeypatch.setattr(engine_mod, "get_stage_connector_spec", lambda **_: {})
+    monkeypatch.setattr(engine_mod, "resolve_omni_kv_config_for_stage", lambda *_: (None, None, None))
+    monkeypatch.setattr(engine_mod, "setup_stage_devices", lambda *_: None)
+    monkeypatch.setattr(engine_mod, "_inject_kv_stage_info", lambda *_: None)
+
+    def _fake_initialize_diffusion_stage(*args, **kwargs):
+        nonlocal captured_use_inline
+        captured_use_inline = kwargs.get("use_inline")
+        return diffusion_client
+
+    monkeypatch.setattr(engine_mod, "initialize_diffusion_stage", _fake_initialize_diffusion_stage)
+    monkeypatch.setattr(
+        engine_mod,
+        "finalize_initialized_stages",
+        lambda stage_clients, _input_processor: (
+            stage_clients,
+            [types.SimpleNamespace()],
+            [{"final_output_type": "image"}],
+        ),
+    )
+
+    try:
+        engine._initialize_stages(stage_init_timeout=1)
+    finally:
+        if old_env is None:
+            os.environ.pop(env_var, None)
+        else:
+            os.environ[env_var] = old_env
+
+    assert captured_use_inline is True
+
 
 def test_attach_llm_stage_uses_omni_input_preprocessor(monkeypatch):
     """Regression test for GLM-Image t2i preprocessing path.

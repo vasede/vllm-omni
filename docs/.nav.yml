@@ -62,6 +62,7 @@ nav:
         - FP8: user_guide/diffusion/quantization/fp8.md
         - Int8: user_guide/diffusion/quantization/int8.md
         - GGUF: user_guide/diffusion/quantization/gguf.md
+      - Frame Interpolation: user_guide/diffusion/frame_interpolation.md
       - Step Execution: user_guide/diffusion/step_execution.md
       - Parallelism Acceleration: user_guide/diffusion/parallelism_acceleration.md
       - CPU Offloading: user_guide/diffusion/cpu_offload_diffusion.md

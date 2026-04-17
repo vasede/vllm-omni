@@ -58,6 +58,10 @@ class OmniRequestOutput:
     images: list[Image.Image] = field(default_factory=list)
     prompt: OmniPromptType | None = None
     latents: torch.Tensor | None = None
+    trajectory_timesteps: list[torch.Tensor] | None = None
+    trajectory_latents: torch.Tensor | None = None
+    trajectory_log_probs: torch.Tensor | None = None
+    trajectory_decoded: list[torch.Tensor] | list[Image.Image] | None = None
     metrics: dict[str, Any] = field(default_factory=dict)
     _multimodal_output: dict[str, Any] = field(default_factory=dict)
     _custom_output: dict[str, Any] = field(default_factory=dict)
@@ -67,6 +71,9 @@ class OmniRequestOutput:
 
     # memory usage info
     peak_memory_mb: float = 0.0
+
+    # error handling
+    error: str | None = None
 
     @classmethod
     def from_pipeline(
@@ -101,6 +108,10 @@ class OmniRequestOutput:
         prompt: OmniPromptType | None = None,
         metrics: dict[str, Any] | None = None,
         latents: torch.Tensor | None = None,
+        trajectory_timesteps: list[torch.Tensor] | None = None,
+        trajectory_latents: torch.Tensor | None = None,
+        trajectory_log_probs: torch.Tensor | None = None,
+        trajectory_decoded: list[torch.Tensor] | list[Image.Image] | None = None,
         multimodal_output: dict[str, Any] | None = None,
         custom_output: dict[str, Any] | None = None,
         final_output_type: str = "image",
@@ -115,6 +126,10 @@ class OmniRequestOutput:
             prompt: The prompt used
             metrics: Generation metrics
             latents: Optional latent tensors
+            trajectory_timesteps: Optional sampled timesteps for trajectory outputs
+            trajectory_latents: Optional latent trajectory tensor
+            trajectory_log_probs: Optional per-step log probabilities
+            trajectory_decoded: Optional decoded trajectory frames
             multimodal_output: Optional multimodal output dict
             custom_output: Optional custom output dict (e.g. latent trajectories, prompt embeds)
             stage_durations: Optional stage durations (execution time of each stage) dict
@@ -129,6 +144,10 @@ class OmniRequestOutput:
             images=images,
             prompt=prompt,
             latents=latents,
+            trajectory_timesteps=trajectory_timesteps,
+            trajectory_latents=trajectory_latents,
+            trajectory_log_probs=trajectory_log_probs,
+            trajectory_decoded=trajectory_decoded,
             metrics=metrics or {},
             _multimodal_output=multimodal_output or {},
             _custom_output=custom_output or {},

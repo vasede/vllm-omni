@@ -24,6 +24,21 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def create_diffusion_client(
+    model: str,
+    od_config: OmniDiffusionConfig,
+    metadata: StageMetadata,
+    batch_size: int = 1,
+    use_inline: bool = False,
+) -> Any:
+    """Factory to create either an inline or the default diffusion client."""
+    if use_inline:
+        from vllm_omni.diffusion.inline_stage_diffusion_client import InlineStageDiffusionClient
+
+        return InlineStageDiffusionClient(model, od_config, metadata, batch_size=batch_size)
+    return StageDiffusionClient(model, od_config, metadata, batch_size=batch_size)
+
+
 class StageDiffusionClient:
     """Wraps AsyncOmniDiffusion for use inside the Orchestrator.
 
@@ -176,10 +191,8 @@ class StageDiffusionClient:
                     "todo": True,
                     "reason": f"AsyncOmniDiffusion.{method} is not implemented",
                 }
-            # Extract is_start and profile_prefix from args
             is_start = args[0] if args else True
             profile_prefix = args[1] if len(args) > 1 else None
-            # Generate profile_prefix with stage_id if starting and no prefix provided
             if is_start and profile_prefix is None:
                 profile_prefix = f"stage_{self.stage_id}_diffusion_{int(time.time())}"
             result = target(is_start, profile_prefix)
@@ -200,7 +213,6 @@ class StageDiffusionClient:
                 return await asyncio.wait_for(result, timeout=timeout)
             return await result
 
-        # Fall back to collective RPC for other methods
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             self._engine._executor,
