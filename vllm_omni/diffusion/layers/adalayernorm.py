@@ -172,7 +172,7 @@ class AdaLayerNormZeroSingle(nn.Module):
         if isinstance(emb, tuple):
             emb = emb[0]
         shift_msa, scale_msa, gate_msa = emb.chunk(3, dim=1)
-        x = self.norm(x) * (1 + scale_msa[:, None]) + shift_msa[:, None]
+        x = apply_layernorm_scale_shift(self.norm, x, scale_msa, shift_msa)
         return x, gate_msa
 
 
