@@ -24,11 +24,11 @@ def apply_layernorm_scale_shift(
     shift: torch.Tensor,
 ) -> torch.Tensor:
     """
-        Apply adaptive LayerNorm modulation.
-        Semantically computes:
-            layernorm(x) * (1 + scale) + shift
-        The parameter `scale` and `shift` should be either 2D `[batch, hidden]` or 3D `[batch, 1, hidden]`.
-        On NPU, this function prefers the `mindiesd.layernorm_scale_shift` fused kernel when available. Otherwise it falls back to the native PyTorch implementation.
+    Apply adaptive LayerNorm modulation.
+    Semantically computes:
+        layernorm(x) * (1 + scale) + shift
+    The parameter `scale` and `shift` should be either 2D `[batch, hidden]` or 3D `[batch, 1, hidden]`.
+    On NPU, this function prefers the `mindiesd.layernorm_scale_shift` fused kernel when available. Otherwise it falls back to the native PyTorch implementation.
     """
     if _HAS_MINDIESD and x.device.type == "npu":
         try:
