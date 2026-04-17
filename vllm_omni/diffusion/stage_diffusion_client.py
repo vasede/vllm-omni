@@ -34,6 +34,24 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def create_diffusion_client(
+    model: str,
+    od_config: OmniDiffusionConfig,
+    metadata: StageMetadata,
+    stage_init_timeout: int,
+    batch_size: int = 1,
+    use_inline: bool = False,
+) -> Any:
+    """Factory to create either an inline or out-of-process diffusion client."""
+    if use_inline:
+        from vllm_omni.diffusion.inline_stage_diffusion_client import InlineStageDiffusionClient
+
+        return InlineStageDiffusionClient(model, od_config, metadata, batch_size=batch_size)
+    return StageDiffusionClient(
+        model, od_config, metadata, stage_init_timeout=stage_init_timeout, batch_size=batch_size
+    )
+
+
 class StageDiffusionClient:
     """Communicates with StageDiffusionProc via ZMQ for use inside the Orchestrator.
 
@@ -50,11 +68,12 @@ class StageDiffusionClient:
         model: str,
         od_config: OmniDiffusionConfig,
         metadata: StageMetadata,
+        stage_init_timeout: int,
         batch_size: int = 1,
     ) -> None:
         # Spawn StageDiffusionProc subprocess and wait for READY.
         proc, handshake_address, request_address, response_address = spawn_diffusion_proc(model, od_config)
-        complete_diffusion_handshake(proc, handshake_address)
+        complete_diffusion_handshake(proc, handshake_address, stage_init_timeout)
         self._initialize_client(metadata, request_address, response_address, proc=proc, batch_size=batch_size)
 
     @classmethod
@@ -153,6 +172,13 @@ class StageDiffusionClient:
                         "error": True,
                         "reason": error_msg,
                     }
+                elif req_id is not None:
+                    error_output = OmniRequestOutput.from_diffusion(
+                        request_id=req_id,
+                        images=[],
+                    )
+                    error_output.error = error_msg
+                    self._output_queue.put_nowait(error_output)
 
     # Fields that are subprocess-local and cannot be serialized across
     # process boundaries.  They are recreated in the subprocess with

@@ -1,3 +1,4 @@
+import atexit
 import base64
 import datetime
 import io
@@ -75,6 +76,7 @@ class OmniServerParams(NamedTuple):
     use_omni: bool = True
     use_stage_cli: bool = False
     init_timeout: int | None = None
+    stage_init_timeout: int | None = None  # None defers to the server's own default (300 s)
 
 
 def assert_image_diffusion_response(
@@ -166,7 +168,6 @@ def assert_audio_diffusion_response(
     Validate audio diffusion response.
     """
     raise NotImplementedError("Audio validation is not implemented yet")
-    # consider using assert_audio_valid defined above
 
 
 def _maybe_int(value: Any) -> int | None:
@@ -276,15 +277,32 @@ def assert_video_valid(
                 pass
 
 
-def assert_audio_valid(path: Path, *, sample_rate: int, channels: int, duration_s: float) -> None:
-    """Assert the WAV has the expected sample rate, channel count, and duration."""
+def assert_audio_valid(
+    audio_or_path: Path | np.ndarray,
+    *,
+    sample_rate: int,
+    channels: int,
+    duration_s: float,
+) -> None:
+    """Assert WAV file or (batch, channels, samples) ndarray matches expected audio format."""
+    expected_samples = int(duration_s * sample_rate)
+    if isinstance(audio_or_path, np.ndarray):
+        audio = audio_or_path
+        assert audio.ndim == 3, f"Expected audio ndim=3 (batch, channels, samples), got shape {audio.shape}"
+        assert audio.shape[0] == 1, f"Expected batch size 1, got {audio.shape[0]}"
+        assert audio.shape[1] == channels, f"Expected {channels} channels, got {audio.shape[1]}"
+        assert audio.shape[2] == expected_samples, (
+            f"Expected {expected_samples} samples ({duration_s}s @ {sample_rate} Hz), got {audio.shape[2]}"
+        )
+        return
+
+    path = audio_or_path
     assert path.exists(), f"Audio not found: {path}"
     info = sf.info(str(path))
     assert info.samplerate == sample_rate, f"Expected sample_rate={sample_rate}, got {info.samplerate}"
     assert info.channels == channels, f"Expected {channels} channel(s), got {info.channels}"
-    expected_frames = int(duration_s * sample_rate)
-    assert info.frames == expected_frames, (
-        f"Expected {expected_frames} frames ({duration_s}s @ {sample_rate} Hz), got {info.frames}"
+    assert info.frames == expected_samples, (
+        f"Expected {expected_samples} frames ({duration_s}s @ {sample_rate} Hz), got {info.frames}"
     )
 
 
@@ -1345,9 +1363,10 @@ def modify_stage_config(
                             continue
 
                         # Delete specified paths in this stage
-                        for path in delete_paths:
-                            if path:  # Skip empty paths
-                                delete_by_path(target_stage, path)
+                        # Avoid shadowing the original YAML Path used for the output filename below.
+                        for delete_path in delete_paths:
+                            if delete_path:  # Skip empty paths
+                                delete_by_path(target_stage, delete_path)
             elif "." in key:
                 # Delete using dot-separated path
                 delete_by_path(config, key)
@@ -1377,15 +1396,15 @@ def modify_stage_config(
                             raise KeyError(f"Stage ID {stage_id} not found, available: {available_ids}")
 
                         # Apply updates to this stage
-                        for path, val in stage_updates.items():
+                        for update_path, val in stage_updates.items():
                             # Check if this is a simple key (not dot-separated)
                             # Example: 'engine_input_source' vs 'engine_args.max_model_len'
-                            if "." not in path:
+                            if "." not in update_path:
                                 # Direct key assignment (e.g., updating a list value)
-                                target_stage[path] = val
+                                target_stage[update_path] = val
                             else:
                                 # Dot-separated path (e.g., nested dict access)
-                                apply_update(target_stage, path, val)
+                                apply_update(target_stage, update_path, val)
             elif "." in key:
                 # Apply using dot-separated path
                 apply_update(config, key, value)
@@ -1397,13 +1416,14 @@ def modify_stage_config(
     # within the same second (e.g. test_qwen3_omni_expansion imports both
     # get_chunk_config and get_batch_token_config). int(time.time()) would collide
     # and the later write would overwrite the earlier YAML on disk.
-    base_name = yaml_path.rsplit(".", 1)[0] if "." in yaml_path else yaml_path
-    output_path = f"{base_name}_{time.time_ns()}.yaml"
+    # Keep generated configs outside the repo and delete them when pytest exits.
+    output_fd, output_path = tempfile.mkstemp(prefix=f"{path.stem}_", suffix=".yaml")
+    atexit.register(Path(output_path).unlink, missing_ok=True)
 
-    with open(output_path, "w", encoding="utf-8") as f:
+    with os.fdopen(output_fd, "w", encoding="utf-8") as f:
         yaml.dump(config, f, default_flow_style=None, sort_keys=False, allow_unicode=True, indent=2)
 
-    return output_path
+    return str(output_path)
 
 
 class OmniServer:
@@ -1768,10 +1788,14 @@ def omni_server(request: pytest.FixtureRequest, run_level: str, model_prefix: st
             )
 
         server_args = params.server_args or []
-        if params.use_omni:
-            server_args = ["--stage-init-timeout", "120", *server_args]
+        if params.use_omni and params.stage_init_timeout is not None:
+            server_args = [*server_args, "--stage-init-timeout", str(params.stage_init_timeout)]
+        else:
+            server_args = [*server_args, "--stage-init-timeout", "600"]
         if params.init_timeout is not None:
             server_args = [*server_args, "--init-timeout", str(params.init_timeout)]
+        else:
+            server_args = [*server_args, "--init-timeout", "900"]
         if params.use_stage_cli:
             if not params.use_omni:
                 raise ValueError("omni_server with use_stage_cli=True requires use_omni=True")
@@ -1826,6 +1850,7 @@ class OmniResponse:
     e2e_latency: float | None = None
     success: bool = False
     error_message: str | None = None
+    cached_tokens: int | None = None
 
 
 @dataclass
@@ -2321,6 +2346,11 @@ class OpenAIClientHandler:
                 if hasattr(choice.message, "content") and choice.message.content is not None:
                     text_content = choice.message.content
 
+            # Extract cached_tokens for prefix caching tests
+            usage = getattr(chat_completion, "usage", None)
+            if usage and (details := getattr(usage, "prompt_tokens_details", None)):
+                result.cached_tokens = details.cached_tokens
+
             # Calculate end-to-end latency
             result.e2e_latency = time.perf_counter() - start_time
 
@@ -2373,7 +2403,7 @@ class OpenAIClientHandler:
                                 image_url = item.get("image_url", {}).get("url")
                             else:
                                 image_url_obj = getattr(item, "image_url", None)
-                                image_url = hasattr(image_url_obj, "url", None) if image_url_obj else None
+                                image_url = getattr(image_url_obj, "url", None) if image_url_obj else None
                             if image_url and image_url.startswith("data:image"):
                                 b64_data = image_url.split(",", 1)[1]
                                 img = decode_b64_image(b64_data)
@@ -2679,7 +2709,7 @@ class OpenAIClientHandler:
 
         return responses
 
-    def send_diffusion_request(self, request_config: dict[str, Any], request_num: int = 1) -> list[OmniResponse]:
+    def send_diffusion_request(self, request_config: dict[str, Any], request_num: int = 1) -> list[DiffusionResponse]:
         """
         Send OpenAI requests for diffusion models.
 
@@ -2687,9 +2717,9 @@ class OpenAIClientHandler:
             request_config: Request configuration dictionary containing parameters like model, messages
             request_num: Number of requests to send concurrently, defaults to 1 (single request)
         Returns:
-            List[OmniResponse]: List of response objects
+            List[DiffusionResponse]: List of response objects
         """
-        responses = []
+        responses: list[DiffusionResponse] = []
         stream = request_config.get("stream", False)
         modalities = request_config.get("modalities", omit)  # Most diffusion models don't require modalities param
         extra_body = request_config.get("extra_body", None)
@@ -2869,9 +2899,9 @@ class OmniRunner:
         self,
         model_name: str,
         seed: int = 42,
-        stage_init_timeout: int = 300,
+        stage_init_timeout: int = 600,
         batch_timeout: int = 10,
-        init_timeout: int = 300,
+        init_timeout: int = 900,
         shm_threshold_bytes: int = 65536,
         log_stats: bool = False,
         stage_configs_path: str | None = None,
@@ -3257,7 +3287,7 @@ def omni_runner(request, model_prefix):
     with _omni_server_lock:
         model, stage_config_path = request.param
         model = model_prefix + model
-        with OmniRunner(model, seed=42, stage_configs_path=stage_config_path, stage_init_timeout=300) as runner:
+        with OmniRunner(model, seed=42, stage_configs_path=stage_config_path) as runner:
             print("OmniRunner started successfully")
             yield runner
             print("OmniRunner stopping...")
