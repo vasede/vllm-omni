@@ -5,6 +5,7 @@ import torch.nn as nn
 from vllm.logger import init_logger
 
 from vllm_omni.diffusion.layers.custom_op import CustomOp
+from vllm_omni.diffusion.layers.norm import LayerNorm
 
 logger = init_logger(__name__)
 
@@ -22,7 +23,7 @@ class AdaLayerNorm(CustomOp):
         self.eps = eps
         self.elementwise_affine = elementwise_affine
         self.hidden_size = hidden_size
-        self.layernorm = nn.LayerNorm(self.hidden_size, elementwise_affine=self.elementwise_affine, eps=self.eps)
+        self.layernorm = LayerNorm(self.hidden_size, elementwise_affine=self.elementwise_affine, eps=self.eps)
 
     def forward_cuda(
         self,
