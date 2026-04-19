@@ -140,6 +140,27 @@ class DiffusionWorker:
                 enable_expert_parallel=parallel_config.enable_expert_parallel,
             )
             init_workspace_manager(self.device)
+            
+            # Register vllm-ascend custom ops (e.g. AscendRMSNorm) so that
+            # CustomOp.__new__ can substitute them at model instantiation time.
+            # NPUWorker does this in its __init__, but DiffusionWorker is
+            # independent and must call it explicitly.
+            if current_omni_platform.is_npu():
+                try:
+                    from vllm_ascend.utils import register_ascend_customop
+                    register_ascend_customop(self.vllm_config)
+                    # Inject a no-op sentinel so AscendRMSNorm.forward_oot()
+                    # does not crash on None. DiffusionWorker never goes through
+                    # NPUWorker's ModelRunner which normally calls
+                    # set_weight_prefetch_method().
+                    import vllm_ascend.utils as _asc_utils
+                    if _asc_utils._WEIGHT_PREFETCH_METHOD is None:
+                        class _NoOpPrefetch:
+                            def __getattr__(self, name):
+                                return lambda *a, **kw: None
+                        _asc_utils._WEIGHT_PREFETCH_METHOD = _NoOpPrefetch()
+                except ImportError:
+                    pass
 
     def _create_profiler(self) -> WorkerProfiler | None:
         profiler_config = self.od_config.profiler_config
