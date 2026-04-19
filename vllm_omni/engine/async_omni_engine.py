@@ -25,12 +25,15 @@ from typing import TYPE_CHECKING, Any
 import janus
 import torch
 from omegaconf import OmegaConf
+from vllm import envs as vllm_envs
+from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.input_processor import InputProcessor
 
+from vllm_omni.config.stage_config import strip_parent_engine_args
 from vllm_omni.diffusion.data import DiffusionParallelConfig
 from vllm_omni.diffusion.stage_diffusion_client import StageDiffusionClient
 from vllm_omni.diffusion.stage_diffusion_proc import (
@@ -60,6 +63,7 @@ from vllm_omni.engine.stage_engine_startup import (
 )
 from vllm_omni.engine.stage_init_utils import (
     StartedLlmStage,
+    _inject_inferred_kv_tp_topology,
     acquire_device_locks,
     build_diffusion_config,
     build_engine_args_dict,
@@ -77,7 +81,11 @@ from vllm_omni.engine.stage_init_utils import (
     setup_stage_devices,
     terminate_alive_proc,
 )
-from vllm_omni.entrypoints.utils import load_and_resolve_stage_configs
+from vllm_omni.entrypoints.pd_utils import PDDisaggregationMixin
+from vllm_omni.entrypoints.utils import (
+    inject_omni_kv_config,
+    load_and_resolve_stage_configs,
+)
 from vllm_omni.inputs.preprocess import OmniInputPreprocessor
 from vllm_omni.platforms import current_omni_platform
 
@@ -85,6 +93,27 @@ if TYPE_CHECKING:
     from vllm_omni.engine.arg_utils import OmniEngineArgs
 
 logger = init_logger(__name__)
+
+
+# ============================================================================
+# Parent-EngineArgs field-routing contracts (consumed by
+# AsyncOmniEngine._strip_parent_engine_args when ``stage_configs_path`` is set).
+# ============================================================================
+
+# Fields that must survive the "equal to default → strip" filter because
+# diffusion stages need them even when equal to vllm's default value
+# (e.g. colocate worker setup relies on worker_extension_cls being forwarded).
+_PARENT_ARGS_KEEP: frozenset[str] = frozenset({"worker_extension_cls"})
+
+# Omni orchestrator-level fields consumed by ``_resolve_stage_configs`` that
+# must never leak into per-stage EngineArgs (``stage_configs_path`` would
+# trigger the ``create_model_config`` guard).
+_PARENT_ARGS_STRIP: frozenset[str] = frozenset({"stage_configs_path"})
+
+# Fields always populated by callers (via ``from_cli_args`` / ``asdict``) so
+# their presence as an override is never a surprise — suppress the
+# "override ignored" warning for these.
+_PARENT_ARGS_NO_WARN: frozenset[str] = frozenset({"model"})
 
 
 def _patch_generation_config_if_needed(model_config: Any) -> None:
@@ -377,6 +406,12 @@ class AsyncOmniEngine:
                             omni_kv["omni_to_stage"] = omni_to
                             omni_kv.setdefault("stage_id", metadata.stage_id)
                             engine_args_dict["omni_kv_config"] = omni_kv
+                        if self.stage_configs:
+                            _inject_inferred_kv_tp_topology(
+                                engine_args_dict.get("omni_kv_config"),
+                                metadata.stage_id,
+                                self.stage_configs,
+                            )
                         vllm_config, executor_class = build_vllm_config(
                             stage_cfg,
                             self.model,
@@ -423,20 +458,23 @@ class AsyncOmniEngine:
                                 proc=proc,
                             )
                         logger.info("[AsyncOmniEngine] Stage %s engine launch started", metadata.stage_id)
-                        # Keep the stage-specific device visibility until vLLM
-                        # finishes starting all child processes.
-                        if self.single_stage_mode and self._omni_master_server is not None:
-                            launch_stack.close()
-                        else:
-                            assert proc is not None
-                            assert handshake_address is not None
-                            complete_stage_handshake(proc, handshake_address, addresses, vllm_config)
-                        logger.info("[AsyncOmniEngine] Stage %s engine startup completed", metadata.stage_id)
                     finally:
                         if previous_visible_devices is None:
                             current_omni_platform.unset_device_control_env_var()
                         else:
                             current_omni_platform.set_device_control_env_var(previous_visible_devices)
+
+                # After StageEngineCoreProc has been spawned it carries its
+                # stage-specific device visibility into descendants, so the
+                # slow HELLO/READY handshake can run without holding the
+                # process-wide launch lock.
+                if self.single_stage_mode and self._omni_master_server is not None:
+                    launch_stack.close()
+                else:
+                    assert proc is not None
+                    assert handshake_address is not None
+                    complete_stage_handshake(proc, handshake_address, addresses, vllm_config, stage_init_timeout)
+                logger.info("[AsyncOmniEngine] Stage %s engine startup completed", metadata.stage_id)
 
             assert started_stage is not None
             return started_stage
@@ -743,10 +781,8 @@ class AsyncOmniEngine:
                                 setup_stage_devices(configured_stage_id, metadata.runtime_cfg)
                                 omni_conn_cfg, omni_from, omni_to = omni_kv_connector
                                 if omni_conn_cfg:
-                                    from vllm_omni.entrypoints.utils import inject_omni_kv_config
-
                                     inject_omni_kv_config(stage_cfg, omni_conn_cfg, omni_from, omni_to)
-                                inject_kv_stage_info(stage_cfg, configured_stage_id)
+                                inject_kv_stage_info(stage_cfg, configured_stage_id, self.stage_configs)
                                 if self.single_stage_mode:
                                     assert self._omni_master_server is not None
                                     stage_clients[stage_idx] = self._launch_diffusion_stage(
@@ -755,11 +791,14 @@ class AsyncOmniEngine:
                                         self._omni_master_server,
                                     )
                                 else:
+                                    use_inline = True if self.num_stages == 1 else False
                                     stage_clients[stage_idx] = initialize_diffusion_stage(
                                         self.model,
                                         stage_cfg,
                                         metadata,
+                                        stage_init_timeout=stage_init_timeout,
                                         batch_size=self.diffusion_batch_size,
+                                        use_inline=use_inline,
                                     )
                                 logger.info(
                                     "[AsyncOmniEngine] Stage %s initialized (diffusion, batch_size=%d)",
@@ -887,6 +926,7 @@ class AsyncOmniEngine:
             self._initialize_janus_queues()
 
             self._initialize_stages(stage_init_timeout)
+            pd_config = self._detect_pd_config()
             orchestrator = Orchestrator(
                 request_async_queue=self.request_queue.async_q,
                 output_async_queue=self.output_queue.async_q,
@@ -895,6 +935,7 @@ class AsyncOmniEngine:
                 stage_clients=self.stage_clients,
                 output_processors=self.output_processors,
                 stage_vllm_configs=self.stage_vllm_configs,
+                pd_config=pd_config,
             )
             if not startup_future.done():
                 startup_future.set_result(asyncio.get_running_loop())
@@ -1057,7 +1098,6 @@ class AsyncOmniEngine:
                 params=companion_params,
                 supported_tasks=self.supported_tasks,
             )
-            request = _upgrade_to_omni_request(request, companion_prompt)
             request.external_req_id = cid
 
             self.output_processors[0].add_request(
@@ -1117,12 +1157,64 @@ class AsyncOmniEngine:
             cache_config = AsyncOmniEngine._get_default_cache_config(cache_backend)
         return cache_config
 
+    def _detect_pd_config(self) -> dict[str, Any] | None:
+        """Detect PD (Prefill-Decode) disaggregation config from stage_configs.
+        Returns a dict with 'pd_pair' and 'bootstrap_addr', or None.
+        """
+        pd_pair = PDDisaggregationMixin.detect_pd_separation_from_stage_configs(self.stage_configs)
+        if pd_pair is None:
+            return None
+        prefill_idx, decode_idx = pd_pair
+
+        # Extract bootstrap address from prefill stage engine_args
+        bootstrap_addr: str | None = None
+        try:
+            prefill_cfg = self.stage_configs[prefill_idx]
+            ea = getattr(prefill_cfg, "engine_args", None)
+            kv_cfg = getattr(ea, "kv_transfer_config", None) if ea is not None else None
+            if kv_cfg is not None:
+                port = vllm_envs.VLLM_MOONCAKE_BOOTSTRAP_PORT
+                kv_ip = getattr(kv_cfg, "kv_ip", None) or "127.0.0.1"
+                bootstrap_addr = f"http://{kv_ip}:{port}"
+        except Exception as exc:
+            logger.warning("[AsyncOmniEngine] Could not extract PD bootstrap address: %s", exc)
+
+        logger.info(
+            "[AsyncOmniEngine] PD disaggregation detected: prefill=stage-%d, decode=stage-%d, bootstrap=%s",
+            prefill_idx,
+            decode_idx,
+            bootstrap_addr,
+        )
+        prefill_engine_id: str | None = None
+        try:
+            prefill_client = self.stage_clients[prefill_idx]
+            kv_cfg = getattr(getattr(prefill_client, "vllm_config", None), "kv_transfer_config", None)
+            prefill_engine_id = getattr(kv_cfg, "engine_id", None)
+        except Exception as exc:
+            logger.warning("[AsyncOmniEngine] Could not extract prefill engine_id: %s", exc)
+
+        return {
+            "pd_pair": (prefill_idx, decode_idx),
+            "bootstrap_addr": bootstrap_addr,
+            "prefill_engine_id": prefill_engine_id,
+        }
+
     @staticmethod
     def _create_default_diffusion_stage_cfg(kwargs: dict[str, Any]) -> list:
         """Create a default single-stage diffusion config from kwargs."""
         # We temporally create a default config for diffusion stage.
         # In the future, we should merge the default config with the user-provided config.
         normalized_kwargs = dict(kwargs)
+        default_sampling_params = normalized_kwargs.get("default_sampling_params")
+        if isinstance(default_sampling_params, str):
+            try:
+                default_sampling_params = json.loads(default_sampling_params)
+            except json.JSONDecodeError:
+                logger.warning("Invalid default_sampling_params JSON, ignoring stage defaults.")
+                default_sampling_params = None
+        if not isinstance(default_sampling_params, dict):
+            default_sampling_params = None
+        stage_default_sampling_params = default_sampling_params.get("0", {}) if default_sampling_params else {}
 
         # TODO: hack, convert dtype to string to avoid non-premitive omegaconf create error.
         if "dtype" in normalized_kwargs and not isinstance(normalized_kwargs["dtype"], str):
@@ -1186,6 +1278,8 @@ class AsyncOmniEngine:
             "enable_cpu_offload": kwargs.get("enable_cpu_offload", False),
             "enable_layerwise_offload": kwargs.get("enable_layerwise_offload", False),
             "enforce_eager": kwargs.get("enforce_eager", False),
+            "boundary_ratio": kwargs.get("boundary_ratio", None),
+            "flow_shift": kwargs.get("flow_shift", None),
             "diffusion_load_format": kwargs.get("diffusion_load_format", "default"),
             "custom_pipeline_args": kwargs.get("custom_pipeline_args", None),
             "worker_extension_cls": kwargs.get("worker_extension_cls", None),
@@ -1217,6 +1311,7 @@ class AsyncOmniEngine:
                     "devices": devices,
                 },
                 "engine_args": stage_engine_args,
+                "default_sampling_params": stage_default_sampling_params,
                 "final_output": True,
                 "final_output_type": "image",
             }
@@ -1224,10 +1319,50 @@ class AsyncOmniEngine:
         default_stage_cfg[0]["engine_args"]["model_stage"] = "diffusion"
         return default_stage_cfg
 
+    @staticmethod
+    def _strip_single_engine_args(kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Remove parent ``EngineArgs`` fields from *kwargs*.
+
+        When ``stage_configs_path`` is set, per-stage engine args are defined
+        in the YAML.  Top-level single-engine fields (``compilation_config``,
+        ``tensor_parallel_size``, …) must not leak into per-stage configs via
+        the ``base_engine_args`` merge in ``load_stage_configs_from_yaml`` —
+        they can cause type errors (e.g. ``compilation_config`` as a JSON
+        string rejected by ``VllmConfig``) or silently override YAML values.
+
+        Logs a warning for any parent field whose value differs from the
+        dataclass default, so users know their explicit overrides are ignored.
+        See the module-level ``_PARENT_ARGS_*`` constants for the routing
+        contracts this method enforces.
+        """
+        parent_fields: dict[str, dataclasses.Field] = {f.name: f for f in dataclasses.fields(EngineArgs)}
+        result, overridden = strip_parent_engine_args(
+            kwargs,
+            parent_fields=parent_fields,
+            keep_keys=_PARENT_ARGS_KEEP,
+            strip_keys=_PARENT_ARGS_STRIP,
+            no_warn_keys=_PARENT_ARGS_NO_WARN,
+        )
+
+        if overridden:
+            logger.warning(
+                "stage_configs_path is set — the following top-level engine "
+                "args are ignored (per-stage YAML takes precedence): %s",
+                ", ".join(sorted(overridden)),
+            )
+
+        return result
+
     def _resolve_stage_configs(self, model: str, kwargs: dict[str, Any]) -> tuple[str, list[Any]]:
         """Resolve stage configs and inject defaults shared by orchestrator/headless."""
 
         stage_configs_path = kwargs.get("stage_configs_path", None)
+        deploy_config_path = kwargs.pop("deploy_config", None)
+        stage_overrides_json = kwargs.pop("stage_overrides", None)
+        # Set of CLI keys the user actually typed; ``None`` means we have no
+        # parser-level info (e.g. programmatic Omni() call) and the lower
+        # layers should treat all kwargs as explicit.
+        cli_explicit_keys = kwargs.pop("_cli_explicit_keys", None)
         explicit_stage_configs = kwargs.pop("stage_configs", None)
         if explicit_stage_configs is not None:
             logger.warning(
@@ -1235,13 +1370,32 @@ class AsyncOmniEngine:
                 "Ignoring it and resolving stages from stage_configs_path/model factory."
             )
 
-        # Use the legacy config loading path (load_and_resolve_stage_configs).
-        # StageConfigFactory wiring will be done in config refactor [2/N].
+        if stage_configs_path is not None:
+            base_kwargs = self._strip_single_engine_args(kwargs)
+        else:
+            base_kwargs = kwargs
+
+        # Parse --stage-overrides JSON string if provided
+        stage_overrides = None
+        if stage_overrides_json:
+            if isinstance(stage_overrides_json, str):
+                try:
+                    stage_overrides = json.loads(stage_overrides_json)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        f"--stage-overrides is not valid JSON: {exc}. Got: {stage_overrides_json!r}"
+                    ) from exc
+            else:
+                stage_overrides = stage_overrides_json
+
         config_path, stage_configs = load_and_resolve_stage_configs(
             model,
             stage_configs_path,
-            kwargs,
+            base_kwargs,
             default_stage_cfg_factory=lambda: self._create_default_diffusion_stage_cfg(kwargs),
+            deploy_config_path=deploy_config_path,
+            stage_overrides=stage_overrides,
+            cli_explicit_keys=cli_explicit_keys,
         )
 
         # Inject diffusion LoRA-related knobs from kwargs if not present in the stage config.
