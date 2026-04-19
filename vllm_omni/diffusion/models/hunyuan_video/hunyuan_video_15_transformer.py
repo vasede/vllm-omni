@@ -17,6 +17,7 @@ from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from diffusers.models.normalization import AdaLayerNormContinuous, AdaLayerNormZero
 from torch import nn
 from vllm.logger import init_logger
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
@@ -27,14 +28,6 @@ from vllm_omni.diffusion.distributed.hsdp_utils import is_transformer_block_modu
 from vllm_omni.diffusion.layers.rope import RotaryEmbedding
 from vllm_omni.diffusion.models.flux.flux_transformer import FeedForward
 from vllm_omni.platforms import current_omni_platform
-
-try:
-    if current_omni_platform.is_npu() and find_spec("mindiesd") is not None:
-        from mindiesd import RMSNorm
-    else:
-        raise ImportError
-except Exception:
-    from vllm.model_executor.layers.layernorm import RMSNorm
 
 logger = init_logger(__name__)
 
