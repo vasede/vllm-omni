@@ -308,7 +308,7 @@ class DiffusionEngine:
     def make_engine(
         config: OmniDiffusionConfig,
         scheduler: SchedulerInterface | None = None,
-    ) -> "DiffusionEngine":
+    ) -> DiffusionEngine:
         """Factory method to create a DiffusionEngine instance.
 
         Args:
@@ -357,9 +357,10 @@ class DiffusionEngine:
                     finished_req_ids = self.scheduler.update_from_output(sched_output, output)
 
                     if output.error:
+                        status_code = 400 if "`max_sequence_length`" in output.error else 500
                         raise OmniRequestError(
                             output.error,
-                            status_code=500,
+                            status_code=status_code,
                             error_type="DiffusionExecutionError",
                         )
                     if target_sched_req_id in finished_req_ids:

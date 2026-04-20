@@ -28,11 +28,15 @@ from vllm_omni.diffusion.models.wan2_2.wan2_2_transformer import WanTransformer3
 from vllm_omni.diffusion.postprocess import interpolate_video_tensor
 from vllm_omni.diffusion.profiler.diffusion_pipeline_profiler import DiffusionPipelineProfilerMixin
 from vllm_omni.diffusion.request import OmniDiffusionRequest
+from vllm_omni.diffusion.utils.prompt_utils import (
+    validate_prompt_sequence_lengths,
+)
 from vllm_omni.inputs.data import OmniTextPrompt
 from vllm_omni.platforms import current_omni_platform
 
 logger = logging.getLogger(__name__)
 DEBUG_PERF = False
+WAN22_MAX_SEQUENCE_LENGTH = 2048
 
 
 def retrieve_latents(
@@ -248,6 +252,7 @@ class Wan22Pipeline(nn.Module, CFGParallelMixin, ProgressBarMixin, DiffusionPipe
                 pass
 
         self.boundary_ratio = od_config.boundary_ratio
+        self.tokenizer_max_length = WAN22_MAX_SEQUENCE_LENGTH
 
         # Determine which transformers to load based on boundary_ratio
         # boundary_ratio=1.0: only load transformer_2 (low-noise stage only)
@@ -423,6 +428,7 @@ class Wan22Pipeline(nn.Module, CFGParallelMixin, ProgressBarMixin, DiffusionPipe
             negative_prompt_embeds=negative_prompt_embeds,
             guidance_scale_2=guidance_high if boundary_ratio is not None else None,
             boundary_ratio=boundary_ratio,
+            max_sequence_length=req.sampling_params.max_sequence_length or self.tokenizer_max_length,
         )
 
         if num_frames % self.vae_scale_factor_temporal != 1:
@@ -456,7 +462,7 @@ class Wan22Pipeline(nn.Module, CFGParallelMixin, ProgressBarMixin, DiffusionPipe
                 negative_prompt=negative_prompt,
                 do_classifier_free_guidance=guidance_low > 1.0 or guidance_high > 1.0,
                 num_videos_per_prompt=req.sampling_params.num_outputs_per_prompt or 1,
-                max_sequence_length=req.sampling_params.max_sequence_length or 512,
+                max_sequence_length=req.sampling_params.max_sequence_length or self.tokenizer_max_length,
                 device=device,
                 dtype=dtype,
             )
@@ -743,7 +749,7 @@ class Wan22Pipeline(nn.Module, CFGParallelMixin, ProgressBarMixin, DiffusionPipe
         negative_prompt: str | list[str] | None = None,
         do_classifier_free_guidance: bool = True,
         num_videos_per_prompt: int = 1,
-        max_sequence_length: int = 512,
+        max_sequence_length: int = WAN22_MAX_SEQUENCE_LENGTH,
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ):
@@ -753,11 +759,51 @@ class Wan22Pipeline(nn.Module, CFGParallelMixin, ProgressBarMixin, DiffusionPipe
         prompt = [prompt] if isinstance(prompt, str) else prompt
         prompt_clean = [self._prompt_clean(p) for p in prompt]
         batch_size = len(prompt_clean)
+        text_inputs_untruncated = self.tokenizer(
+            prompt_clean,
+            padding=True,
+            truncation=False,
+            add_special_tokens=True,
+            return_attention_mask=True,
+            return_tensors="pt",
+        )
+        validate_prompt_sequence_lengths(
+            text_inputs_untruncated.attention_mask,
+            max_sequence_length=max_sequence_length,
+            supported_max_sequence_length=self.tokenizer_max_length,
+            error_context="for Wan2.2 text encoding",
+        )
+        prompt_encode_length = max(int(text_inputs_untruncated.attention_mask.sum(dim=1).max().item()), 1)
+
+        negative_prompt_embeds = None
+        if do_classifier_free_guidance:
+            negative_prompt = negative_prompt or ""
+            negative_prompt = batch_size * [negative_prompt] if isinstance(negative_prompt, str) else negative_prompt
+            negative_prompt_clean = [self._prompt_clean(p) for p in negative_prompt]
+            neg_text_inputs_untruncated = self.tokenizer(
+                negative_prompt_clean,
+                padding=True,
+                truncation=False,
+                add_special_tokens=True,
+                return_attention_mask=True,
+                return_tensors="pt",
+            )
+            validate_prompt_sequence_lengths(
+                neg_text_inputs_untruncated.attention_mask,
+                max_sequence_length=max_sequence_length,
+                supported_max_sequence_length=self.tokenizer_max_length,
+                prompt_name="negative_prompt",
+                error_context="for Wan2.2 text encoding",
+            )
+            prompt_encode_length = max(
+                prompt_encode_length,
+                int(neg_text_inputs_untruncated.attention_mask.sum(dim=1).max().item()),
+            )
 
         text_inputs = self.tokenizer(
             prompt_clean,
             padding="max_length",
-            max_length=max_sequence_length,
+            max_length=prompt_encode_length,
             truncation=True,
             add_special_tokens=True,
             return_attention_mask=True,
@@ -770,21 +816,18 @@ class Wan22Pipeline(nn.Module, CFGParallelMixin, ProgressBarMixin, DiffusionPipe
         prompt_embeds = prompt_embeds.to(dtype=dtype, device=device)
         prompt_embeds = [u[:v] for u, v in zip(prompt_embeds, seq_lens)]
         prompt_embeds = torch.stack(
-            [torch.cat([u, u.new_zeros(max_sequence_length - u.size(0), u.size(1))]) for u in prompt_embeds], dim=0
+            [torch.cat([u, u.new_zeros(prompt_encode_length - u.size(0), u.size(1))]) for u in prompt_embeds], dim=0
         )
 
         _, seq_len, _ = prompt_embeds.shape
         prompt_embeds = prompt_embeds.repeat(1, num_videos_per_prompt, 1)
         prompt_embeds = prompt_embeds.view(batch_size * num_videos_per_prompt, seq_len, -1)
 
-        negative_prompt_embeds = None
         if do_classifier_free_guidance:
-            negative_prompt = negative_prompt or ""
-            negative_prompt = batch_size * [negative_prompt] if isinstance(negative_prompt, str) else negative_prompt
             neg_text_inputs = self.tokenizer(
-                [self._prompt_clean(p) for p in negative_prompt],
+                negative_prompt_clean,
                 padding="max_length",
-                max_length=max_sequence_length,
+                max_length=prompt_encode_length,
                 truncation=True,
                 add_special_tokens=True,
                 return_attention_mask=True,
@@ -797,7 +840,7 @@ class Wan22Pipeline(nn.Module, CFGParallelMixin, ProgressBarMixin, DiffusionPipe
             negative_prompt_embeds = [u[:v] for u, v in zip(negative_prompt_embeds, seq_lens_neg)]
             negative_prompt_embeds = torch.stack(
                 [
-                    torch.cat([u, u.new_zeros(max_sequence_length - u.size(0), u.size(1))])
+                    torch.cat([u, u.new_zeros(prompt_encode_length - u.size(0), u.size(1))])
                     for u in negative_prompt_embeds
                 ],
                 dim=0,
@@ -854,6 +897,7 @@ class Wan22Pipeline(nn.Module, CFGParallelMixin, ProgressBarMixin, DiffusionPipe
         negative_prompt_embeds=None,
         guidance_scale_2=None,
         boundary_ratio=None,
+        max_sequence_length=None,
     ):
         if height % 16 != 0 or width % 16 != 0:
             raise ValueError(f"`height` and `width` have to be divisible by 16 but are {height} and {width}.")
@@ -879,6 +923,11 @@ class Wan22Pipeline(nn.Module, CFGParallelMixin, ProgressBarMixin, DiffusionPipe
             not isinstance(negative_prompt, str) and not isinstance(negative_prompt, list)
         ):
             raise ValueError(f"`negative_prompt` has to be of type `str` or `list` but is {type(negative_prompt)}")
+
+        if max_sequence_length is not None and max_sequence_length > self.tokenizer_max_length:
+            raise ValueError(
+                f"`max_sequence_length` cannot be greater than {self.tokenizer_max_length} but is {max_sequence_length}"
+            )
 
         if boundary_ratio is None and guidance_scale_2 is not None:
             raise ValueError("`guidance_scale_2` is only supported when `boundary_ratio` is set.")

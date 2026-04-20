@@ -171,7 +171,7 @@ def test_client(mock_async_diffusion):
     app.state.stage_configs = [SimpleNamespace(stage_type="diffusion")]
     app.state.diffusion_model_name = "Qwen/Qwen-Image"  # For models endpoint
     app.state.args = Namespace(
-        default_sampling_params='{"0": {"num_inference_steps":4, "guidance_scale":7.5}}',
+        default_sampling_params='{"0": {"num_inference_steps":4, "guidance_scale":7.5, "generator_device":"cpu"}}',
         max_generated_image_size=1024 * 1792,
     )
 
@@ -194,7 +194,7 @@ def async_omni_test_client():
         SimpleNamespace(stage_type="diffusion"),
     ]
     app.state.args = Namespace(
-        default_sampling_params='{"1": {"num_inference_steps":4, "guidance_scale":7.5}}',
+        default_sampling_params='{"1": {"num_inference_steps":4, "guidance_scale":7.5, "generator_device":"cpu"}}',
         max_generated_image_size=1048576,  # 1024*1024 to support resolution tests
     )
     return TestClient(app)
@@ -216,7 +216,7 @@ def async_omni_rgba_test_client():
         SimpleNamespace(stage_type="diffusion"),
     ]
     app.state.args = Namespace(
-        default_sampling_params='{"1": {"num_inference_steps":4, "guidance_scale":7.5}}',
+        default_sampling_params='{"1": {"num_inference_steps":4, "guidance_scale":7.5, "generator_device":"cpu"}}',
         max_generated_image_size=1048576,
     )
     return TestClient(app)
@@ -238,7 +238,7 @@ def async_omni_stage_configs_only_client():
     # Intentionally do not populate app.state.stage_configs. Refactored
     # AsyncOmni exposes stage_configs on the engine instance.
     app.state.args = Namespace(
-        default_sampling_params='{"1": {"num_inference_steps":4, "guidance_scale":7.5}}',
+        default_sampling_params='{"1": {"num_inference_steps":4, "guidance_scale":7.5, "generator_device":"cpu"}}',
         max_generated_image_size=1024 * 1792,
     )
     return TestClient(app)
@@ -776,6 +776,63 @@ def test_image_edit_rejects_multiple_images_when_model_does_not_support_them(asy
     assert engine.captured_prompt is None
 
 
+def test_image_edit_rejects_too_many_images_for_qwen_image_edit_2511(async_omni_test_client):
+    engine = async_omni_test_client.app.state.engine_client
+    engine.get_diffusion_od_config = lambda: SimpleNamespace(
+        supports_multimodal_inputs=True,
+        max_multimodal_image_inputs=4,
+    )
+
+    response = async_omni_test_client.post(
+        "/v1/images/edits",
+        files=[
+            ("image", make_test_image_bytes((16, 16))),
+            ("image", make_test_image_bytes((16, 16))),
+            ("image", make_test_image_bytes((16, 16))),
+            ("image", make_test_image_bytes((16, 16))),
+            ("image", make_test_image_bytes((16, 16))),
+        ],
+        data={"prompt": "hello world."},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Received 5 input images. At most 4 images are supported by this model."
+    assert engine.captured_prompt is None
+
+
+def test_image_edit_rejects_too_many_images_for_qwen_image_edit_2511_before_loading(
+    async_omni_test_client, monkeypatch: pytest.MonkeyPatch
+):
+    import vllm_omni.entrypoints.openai.api_server as api_server_module
+
+    engine = async_omni_test_client.app.state.engine_client
+    engine.get_diffusion_od_config = lambda: SimpleNamespace(
+        supports_multimodal_inputs=True,
+        max_multimodal_image_inputs=4,
+    )
+
+    def _fail_load(*args, **kwargs):
+        raise AssertionError("_load_input_images should not run for over-limit requests")
+
+    monkeypatch.setattr(api_server_module, "_load_input_images", _fail_load)
+
+    response = async_omni_test_client.post(
+        "/v1/images/edits",
+        files=[
+            ("image", make_test_image_bytes((16, 16))),
+            ("image", make_test_image_bytes((16, 16))),
+            ("image", make_test_image_bytes((16, 16))),
+            ("image", make_test_image_bytes((16, 16))),
+            ("image", make_test_image_bytes((16, 16))),
+        ],
+        data={"prompt": "hello world."},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Received 5 input images. At most 4 images are supported by this model."
+    assert engine.captured_prompt is None
+
+
 def test_image_edit_parameter_pass(async_omni_test_client):
     img_bytes_1 = make_test_image_bytes((16, 16))
 
@@ -954,6 +1011,7 @@ def test_image_edit_parameter_default(async_omni_test_client):
     assert captured_sampling_params.num_outputs_per_prompt == 1
     assert captured_sampling_params.num_inference_steps == 4
     assert captured_sampling_params.guidance_scale == 7.5
+    assert captured_sampling_params.generator_device == "cpu"
 
     # Test that a size exceeding max_generated_image_size returns 400
     response = async_omni_test_client.post(
@@ -987,6 +1045,7 @@ def test_image_edit_parameter_default_single_stage(test_client):
     assert captured_sampling_params.num_outputs_per_prompt == 1
     assert captured_sampling_params.num_inference_steps == 4
     assert captured_sampling_params.guidance_scale == 7.5
+    assert captured_sampling_params.generator_device == "cpu"
 
     # Size exceeding max_generated_image_size (1024*1792) returns 400
     response = test_client.post(

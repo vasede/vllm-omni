@@ -31,6 +31,7 @@ from vllm_omni.diffusion.distributed.sp_plan import (
     SequenceParallelOutput,
 )
 from vllm_omni.diffusion.forward_context import get_forward_context
+from vllm_omni.diffusion.layers.adalayernorm import AdaLayerNorm
 
 logger = init_logger(__name__)
 
@@ -633,7 +634,7 @@ class WanTransformerBlock(nn.Module):
 
         # 1. Self-attention
         self.norm1 = AdaLayerNorm(dim, elementwise_affine=False, eps=eps)
-        
+
         self.attn1 = WanSelfAttention(
             dim=dim,
             num_heads=num_heads,
@@ -694,9 +695,7 @@ class WanTransformerBlock(nn.Module):
         hidden_states = hidden_states + attn_output
 
         # 3. Feed-forward
-        norm_hidden_states = self.norm3(hidden_states, c_scale_msa, c_shift_msa).type_as(
-            hidden_states
-        )
+        norm_hidden_states = self.norm3(hidden_states, c_scale_msa, c_shift_msa).type_as(hidden_states)
         ff_output = self.ffn(norm_hidden_states)
         hidden_states = (hidden_states + ff_output * c_gate_msa).type_as(hidden_states)
 

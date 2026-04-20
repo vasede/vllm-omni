@@ -87,7 +87,9 @@ def test_encode_video_bytes_without_audio_uses_diffusers_export(monkeypatch):
     _install_fake_export_to_video(monkeypatch, export_calls)
     monkeypatch.setattr(
         "vllm_omni.diffusion.utils.media_utils.mux_video_audio_bytes",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no-audio path should not use mux_video_audio_bytes")),
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("no-audio path should not use mux_video_audio_bytes")
+        ),
     )
 
     video = np.linspace(0.0, 1.0, num=4 * 2 * 2 * 3, dtype=np.float32).reshape(4, 2, 2, 3)
@@ -123,7 +125,7 @@ def test_frame_interpolator_runs_actual_torch_tensor_path(monkeypatch):
     assert torch.isfinite(output_video).all()
 
 
-def test_frame_interpolator_prefers_input_tensor_device(monkeypatch):
+def test_frame_interpolator_uses_platform_device_when_tensor_is_cpu(monkeypatch):
     chosen_devices = []
     model = rife_interpolator.Model().eval()
 
@@ -134,10 +136,11 @@ def test_frame_interpolator_prefers_input_tensor_device(monkeypatch):
     interpolator = rife_interpolator.FrameInterpolator()
     monkeypatch.setattr(interpolator, "_ensure_model_loaded", _fake_ensure_model_loaded)
     monkeypatch.setattr(model.flownet, "to", lambda device: model.flownet)
+    monkeypatch.setattr(rife_interpolator, "_select_torch_device", lambda: torch.device("cuda"))
 
     video = torch.zeros(1, 3, 2, 32, 32)
     output_video, multiplier = interpolator.interpolate_tensor(video, exp=1, scale=1.0)
 
-    assert chosen_devices == [video.device]
+    assert chosen_devices == [torch.device("cuda")]
     assert multiplier == 2
     assert output_video.shape == (1, 3, 3, 32, 32)

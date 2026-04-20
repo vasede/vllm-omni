@@ -70,6 +70,7 @@ def test_initialize_stages_restores_device_visibility_after_diffusion_init(monke
         else:
             os.environ[env_var] = old_env
 
+
 def test_initialize_stages_uses_inline_diffusion_client_for_single_stage(monkeypatch):
     """Single-stage diffusion init should request the inline client path."""
     import vllm_omni.engine.async_omni_engine as engine_mod
