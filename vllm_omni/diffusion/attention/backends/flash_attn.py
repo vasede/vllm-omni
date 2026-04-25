@@ -210,7 +210,6 @@ class FlashAttentionImpl(AttentionImpl):
             mask_q = attention_mask.unsqueeze(1).unsqueeze(3)  # [B, 1, S, 1]
             attention_mask = mask_k & mask_q  # [B, 1, S, S]
 
-
         output = attention_forward(
             query,
             key,
