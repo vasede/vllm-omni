@@ -33,6 +33,7 @@ from vllm_omni.engine.serialization import serialize_additional_information
 from vllm_omni.metrics.stats import StageRequestStats as StageRequestMetrics
 from vllm_omni.metrics.stats import StageStats
 from vllm_omni.metrics.utils import count_tokens_from_outputs
+from vllm_omni.outputs import OmniRequestOutput
 
 logger = init_logger(__name__)
 
@@ -181,6 +182,7 @@ class Orchestrator:
         self._shutdown_event = asyncio.Event()
         self._stages_shutdown = False
         self._fatal_error: str | None = None
+        self._fatal_error_stage_id: int | None = None
 
     async def run(self) -> None:
         """Main entry point for the Orchestrator event loop."""
@@ -331,6 +333,7 @@ class Orchestrator:
                         e,
                     )
                     self._fatal_error = str(e)
+                    self._fatal_error_stage_id = stage_id
                     for req_id, req_state in list(self.request_states.items()):
                         if stage_id in req_state.stage_submit_ts:
                             await self.output_async_queue.put(
@@ -339,6 +342,7 @@ class Orchestrator:
                                     "error": str(e),
                                     "fatal": True,
                                     "request_id": req_id,
+                                    "stage_id": stage_id,
                                 }
                             )
                             self.request_states.pop(req_id, None)
@@ -686,6 +690,32 @@ class Orchestrator:
                     next_stage_id,
                 )
                 if isinstance(diffusion_prompt, list):
+                    if not diffusion_prompt:
+                        error_output = OmniRequestOutput.from_error(
+                            req_id,
+                            f"Stage-{stage_id} produced no valid inputs for diffusion stage-{next_stage_id}",
+                        )
+                        logger.warning(
+                            "[Orchestrator] req=%s stage=%d produced empty diffusion inputs for stage=%d; "
+                            "routing terminal error output",
+                            req_id,
+                            stage_id,
+                            next_stage_id,
+                        )
+                        await self.output_async_queue.put(
+                            {
+                                "type": "output",
+                                "request_id": req_id,
+                                "stage_id": next_stage_id,
+                                "engine_outputs": error_output,
+                                "metrics": None,
+                                "finished": True,
+                            }
+                        )
+                        self._pd_kv_params.pop(req_id, None)
+                        self._cfg_tracker.cleanup_parent(req_id)
+                        self.request_states.pop(req_id, None)
+                        return
                     diffusion_prompt = diffusion_prompt[0]
             else:
                 diffusion_prompt = req_state.prompt
@@ -1135,6 +1165,7 @@ class Orchestrator:
                         "error": self._fatal_error,
                         "fatal": True,
                         "request_id": req_id,
+                        "stage_id": self._fatal_error_stage_id,
                     }
                 )
                 notified.add(req_id)
@@ -1150,6 +1181,7 @@ class Orchestrator:
                         "error": self._fatal_error,
                         "fatal": True,
                         "request_id": req_id,
+                        "stage_id": self._fatal_error_stage_id,
                     }
                 )
             self.request_states.pop(req_id, None)
