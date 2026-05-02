@@ -203,7 +203,7 @@ class FlashAttentionImpl(AttentionImpl):
 
         # NPU aclnnFlashAttentionScore requires mask shape to be one of:
         # [B, N, Sq, Skv], [B, 1, Sq, Skv], [1, 1, Sq, Skv], or [Sq, Skv]
-        # But the incoming mask is 2D [B, S] — reshape to [B, 1, 1, S] 
+        # But the incoming mask is 2D [B, S] — reshape to [B, 1, 1, S]
         # So reuse SDPA's mask reshape logic: [B, S] -> [B, 1, Sq, Skv]
         attention_mask = _maybe_reshape_attn_mask(query, key, attention_mask, mask_mode="full_qk")
 
