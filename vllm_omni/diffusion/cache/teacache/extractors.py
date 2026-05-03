@@ -94,8 +94,8 @@ class CacheContext:
     hidden_states: torch.Tensor
     encoder_hidden_states: torch.Tensor | None
     temb: torch.Tensor
-    run_transformer_blocks: Callable[[], tuple[torch.Tensor, ...]]
-    postprocess: Callable[[torch.Tensor], Any]
+    run_transformer_blocks: Callable[[], tuple[torch.Tensor, ...]] | None = None
+    postprocess: Callable[[torch.Tensor], Any] | None = None
     extra_states: dict[str, Any] | None = None
 
     def validate(self) -> None:
@@ -125,11 +125,11 @@ class CacheContext:
         if not isinstance(self.temb, torch.Tensor):
             raise TypeError(f"temb must be torch.Tensor, got {type(self.temb)}")
 
-        # Validate callables
-        if not callable(self.run_transformer_blocks):
+        # Validate callables (optional for pipeline-level TeaCache models)
+        if self.run_transformer_blocks is not None and not callable(self.run_transformer_blocks):
             raise TypeError(f"run_transformer_blocks must be callable, got {type(self.run_transformer_blocks)}")
 
-        if not callable(self.postprocess):
+        if self.postprocess is not None and not callable(self.postprocess):
             raise TypeError(f"postprocess must be callable, got {type(self.postprocess)}")
 
         # Validate tensor shapes are compatible
