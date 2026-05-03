@@ -834,12 +834,106 @@ def extract_stable_audio_context(
 #
 # Note: Use the transformer class name as specified in pipelines as TeaCache hooks operate
 # on the transformer module and multiple pipelines can share the same transformer.
+def extract_wan2_2_context(
+    module: nn.Module,
+    hidden_states: torch.Tensor,
+    timestep: torch.LongTensor,
+    encoder_hidden_states: torch.Tensor,
+    encoder_hidden_states_image: torch.Tensor | None = None,
+    **kwargs: Any,
+) -> CacheContext:
+    """
+    Extract cache context for WanTransformer3DModel (Wan2.2 T2V / I2V).
+
+    Wan2.2 uses a single-stream transformer with AdaLayerNorm modulation.
+    The modulated input is extracted from the first transformer block's norm1
+    output on hidden_states, conditioned on timestep_proj.  This is the same
+    signal the block uses to modulate self-attention, making it a reliable
+    cache-decision indicator.
+
+    Pipeline-level approach is required (same reason as HunyuanVideo-1.5):
+    _sp_plan splits hidden_states at blocks.0 input, so hook-based interception
+    before the SP-split would cause a shape mismatch in rotary_emb.
+    """
+    if not hasattr(module, "blocks") or len(module.blocks) == 0:
+        raise ValueError("Module must have blocks")
+
+    block0 = module.blocks[0]
+
+    try:
+        from torch.distributed.fsdp._fully_shard._fully_shard import FSDPModule as _FSDPModule
+    except ImportError:
+        _FSDPModule = None
+
+    _root_is_fsdp = _FSDPModule is not None and isinstance(module, _FSDPModule)
+    _block0_is_fsdp = _FSDPModule is not None and isinstance(block0, _FSDPModule)
+
+    try:
+        if _root_is_fsdp:
+            module.unshard()
+        if _block0_is_fsdp:
+            block0.unshard()
+
+        # Mirror transformer forward preprocessing
+        # Handle timestep shape (TI2V uses 2D timestep)
+        if timestep.ndim == 2:
+            ts_seq_len = timestep.shape[1]
+            timestep_flat = timestep.flatten()
+        else:
+            ts_seq_len = None
+            timestep_flat = timestep
+
+        # Patch embedding: [B, C, T, H, W] -> [B, S, D]
+        hidden_states_emb = module.patch_embedding(hidden_states)
+        hidden_states_emb = hidden_states_emb.flatten(2).transpose(1, 2)
+
+        # Condition embedding: get temb and timestep_proj
+        temb, timestep_proj, _, _ = module.condition_embedder(
+            timestep_flat, encoder_hidden_states, encoder_hidden_states_image,
+            timestep_seq_len=ts_seq_len,
+        )
+        timestep_proj = module.timestep_proj_prepare(timestep_proj, ts_seq_len)
+
+        # Extract modulated input from block0.norm1
+        # WanTransformerBlock: scale_shift_table + timestep_proj -> shift/scale/gate
+        if timestep_proj.ndim == 4:
+            # TI2V mode: [B, seq, 6, dim]
+            shift_msa, scale_msa, *_ = (
+                block0.scale_shift_table.unsqueeze(0) + timestep_proj
+            ).chunk(6, dim=2)
+            shift_msa = shift_msa.squeeze(2)
+            scale_msa = scale_msa.squeeze(2)
+        else:
+            # T2V / I2V mode: [B, 6, dim]
+            shift_msa, scale_msa, *_ = (
+                block0.scale_shift_table + timestep_proj
+            ).chunk(6, dim=1)
+
+        norm_hidden_states = block0.norm1(
+            hidden_states_emb, scale_msa, shift_msa
+        ).type_as(hidden_states_emb)
+
+    finally:
+        if _block0_is_fsdp:
+            block0.reshard()
+        if _root_is_fsdp:
+            module.reshard()
+
+    return CacheContext(
+        modulated_input=norm_hidden_states,
+        hidden_states=hidden_states_emb,
+        encoder_hidden_states=encoder_hidden_states,
+        temb=temb,
+    )
+
+
 EXTRACTOR_REGISTRY: dict[str, Callable] = {
     "QwenImageTransformer2DModel": extract_qwen_context,
     "Bagel": extract_bagel_context,
     "ZImageTransformer2DModel": extract_zimage_context,
     "Flux2Klein": extract_flux2_klein_context,
     "StableAudioDiTModel": extract_stable_audio_context,
+    "WanTransformer3DModel": extract_wan2_2_context,
     # Future models:
     # "FluxTransformer2DModel": extract_flux_context,
     # "CogVideoXTransformer3DModel": extract_cogvideox_context,

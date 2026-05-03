@@ -10,6 +10,8 @@ interface using the hooks-based TeaCache system.
 
 from typing import Any
 
+import torch
+
 from vllm.logger import init_logger
 
 from vllm_omni.diffusion.cache.base import CacheBackend
@@ -67,9 +69,82 @@ def enable_flux2_klein_teacache(pipeline: Any, config: DiffusionCacheConfig) -> 
     )
 
 
+def enable_wan2_2_teacache(pipeline: Any, config: DiffusionCacheConfig) -> None:
+    """
+    Enable TeaCache for Wan22Pipeline (T2V) and Wan22I2VPipeline (I2V).
+
+    Both pipelines share WanTransformer3DModel and use the same pipeline-level
+    TeaCache approach.  Hook-based TeaCache cannot be used here because _sp_plan
+    splits hidden_states at blocks.0 input before the hook would fire, causing a
+    shape mismatch between rotary_emb (computed on unsharded hidden_states) and
+    the sharded hidden_states seen by transformer blocks.
+    """
+    teacache_config = TeaCacheConfig(
+        transformer_type="WanTransformer3DModel",
+        rel_l1_thresh=config.rel_l1_thresh,
+        coefficients=config.coefficients,
+    )
+    pipeline._tea_cache_config = teacache_config
+    logger.info(
+        f"TeaCache enabled for {type(pipeline).__name__} "
+        f"with rel_l1_thresh={teacache_config.rel_l1_thresh}"
+    )
+
+
+def _teacache_init_loop_state(pipeline: Any) -> dict | None:
+    """
+    Initialize TeaCache loop state from pipeline config.
+
+    Returns a state dict if TeaCache is configured on the pipeline, else None.
+    The state dict tracks: rescale polynomial, accumulated distance, previous
+    modulated input, previous noise prediction, and step counter.
+    """
+    import numpy as np
+
+    config = getattr(pipeline, "_tea_cache_config", None)
+    if config is None:
+        return None
+    return {
+        "config": config,
+        "rescale": np.poly1d(config.coefficients),
+        "acc_dist": 0.0,
+        "prev_modulated_input": None,
+        "prev_noise_pred": None,
+        "cnt": 0,
+    }
+
+
+def _teacache_should_compute(state: dict | None, modulated_input: torch.Tensor | None) -> bool:
+    """
+    Decide whether to compute noise_pred or reuse the cached value.
+
+    Computes rel_l1 on the modulated first-block norm output (content-aware signal)
+    rather than a raw timestep delta.  Updates state["prev_modulated_input"] in-place.
+
+    Returns True if noise_pred must be computed, False if cached value can be reused.
+    If state is None or modulated_input is None, always returns True (no caching).
+    """
+    if state is None or modulated_input is None:
+        return True
+    should_compute = True
+    if state["cnt"] > 0 and state["prev_modulated_input"] is not None:
+        prev = state["prev_modulated_input"]
+        rel_l1 = (modulated_input - prev).abs().mean() / (prev.abs().mean() + 1e-8)
+        rescaled = float(state["rescale"](rel_l1.item()))
+        state["acc_dist"] += abs(rescaled)
+        if state["acc_dist"] < state["config"].rel_l1_thresh:
+            should_compute = False
+        else:
+            state["acc_dist"] = 0.0
+    state["prev_modulated_input"] = modulated_input.detach().clone()
+    return should_compute
+
+
 CUSTOM_TEACACHE_ENABLERS = {
     "BagelPipeline": enable_bagel_teacache,
     "Flux2KleinPipeline": enable_flux2_klein_teacache,
+    "Wan22Pipeline": enable_wan2_2_teacache,
+    "Wan22I2VPipeline": enable_wan2_2_teacache,
 }
 
 
@@ -157,6 +232,20 @@ class TeaCacheBackend(CacheBackend):
                                 Currently not used by TeaCache but accepted for interface consistency.
             verbose: Whether to log refresh operations (default: True)
         """
+        # Pipeline-level TeaCache (Wan22Pipeline, Wan22I2VPipeline): state is managed
+        # inside the denoising loop, so refresh is a no-op (state is re-initialized every __call__).
+        if (
+            hasattr(pipeline, "_tea_cache_config")
+            and isinstance(pipeline._tea_cache_config, TeaCacheConfig)
+            and pipeline.__class__.__name__ in ("Wan22Pipeline", "Wan22I2VPipeline")
+        ):
+            if verbose:
+                logger.debug(
+                    f"TeaCache state refreshed for {pipeline.__class__.__name__} "
+                    f"(num_inference_steps={num_inference_steps})"
+                )
+            return
+
         # Extract transformer from pipeline
         transformer = pipeline.transformer
 

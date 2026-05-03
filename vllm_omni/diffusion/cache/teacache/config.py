@@ -46,6 +46,16 @@ _MODEL_COEFFICIENTS = {
         3.20000000e00,
         -2.00000000e-02,
     ],
+    # Wan2.2 transformer coefficients
+    # Source: TeaCache official repo (ali-vilab/TeaCache), empirically validated on Wan2.1.
+    # Wan2.2 shares the same WanTransformer3DModel architecture; coefficients are reused.
+    "WanTransformer3DModel": [
+        -5.21862437e+04,
+         9.23041404e+03,
+        -5.28275948e+02,
+         1.36987616e+01,
+        -4.99875664e-02,
+    ],
     # Estimated TeaCache polynomial coefficients for StableAudioDiTModel.
     "StableAudioDiTModel": [
         121.77490545701518,

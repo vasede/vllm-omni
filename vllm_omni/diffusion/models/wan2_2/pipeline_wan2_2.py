@@ -17,6 +17,8 @@ from torch import nn
 from transformers import AutoTokenizer, UMT5EncoderModel
 from vllm.model_executor.models.utils import AutoWeightsLoader
 
+from vllm_omni.diffusion.cache.teacache.backend import _teacache_init_loop_state, _teacache_should_compute
+from vllm_omni.diffusion.cache.teacache.extractors import extract_wan2_2_context as _wan2_2_extractor
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.distributed.autoencoders.autoencoder_kl_wan import DistributedAutoencoderKLWan
 from vllm_omni.diffusion.distributed.cfg_parallel import CFGParallelMixin
@@ -574,6 +576,9 @@ class Wan22Pipeline(nn.Module, CFGParallelMixin, ProgressBarMixin, DiffusionPipe
 
         if DEBUG_PERF:
             _t_denoise_start = time.perf_counter()
+        # ---- TeaCache initialization ----
+        _tc_state = _teacache_init_loop_state(self)
+
         with self.progress_bar(total=len(timesteps)) as pbar:
             for t in timesteps:
                 self._current_timestep = t
@@ -645,18 +650,38 @@ class Wan22Pipeline(nn.Module, CFGParallelMixin, ProgressBarMixin, DiffusionPipe
                 else:
                     negative_kwargs = None
 
-                # Predict noise with automatic CFG parallel handling
-                noise_pred = self.predict_noise_maybe_with_cfg(
-                    do_true_cfg=do_true_cfg,
-                    true_cfg_scale=current_guidance_scale,
-                    positive_kwargs=positive_kwargs,
-                    negative_kwargs=negative_kwargs,
-                    cfg_normalize=False,
-                )
+                # ---- TeaCache: decide whether to compute or reuse ----
+                # Only cache on self.transformer (stage-1); skip caching for transformer_2
+                # (stage-2 MoE model) to avoid cross-model residual reuse.
+                _mod_input = None
+                if _tc_state is not None and current_model is self.transformer:
+                    _cache_ctx = _wan2_2_extractor(
+                        current_model,
+                        hidden_states=positive_kwargs["hidden_states"],
+                        timestep=positive_kwargs["timestep"],
+                        encoder_hidden_states=positive_kwargs["encoder_hidden_states"],
+                        encoder_hidden_states_image=positive_kwargs.get("encoder_hidden_states_image"),
+                    )
+                    _mod_input = _cache_ctx.modulated_input
+
+                if _teacache_should_compute(_tc_state, _mod_input):
+                    noise_pred = self.predict_noise_maybe_with_cfg(
+                        do_true_cfg=do_true_cfg,
+                        true_cfg_scale=current_guidance_scale,
+                        positive_kwargs=positive_kwargs,
+                        negative_kwargs=negative_kwargs,
+                        cfg_normalize=False,
+                    )
+                    if _tc_state is not None:
+                        _tc_state["prev_noise_pred"] = noise_pred
+                else:
+                    noise_pred = _tc_state["prev_noise_pred"]
 
                 # Compute the previous noisy sample x_t -> x_t-1 with automatic CFG sync
                 latents = self.scheduler_step_maybe_with_cfg(noise_pred, t, latents, do_true_cfg)
 
+                if _tc_state is not None:
+                    _tc_state["cnt"] += 1
                 pbar.update()
 
         # Wan2.2 is prone to out of memory errors when predicting large videos
