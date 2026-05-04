@@ -13,7 +13,7 @@ Covers:
 - TeaCache on vs off consistency (CPU, mock denoising loop)
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -25,7 +25,7 @@ from vllm_omni.diffusion.cache.teacache.backend import (
     _teacache_should_compute,
     enable_wan2_2_teacache,
 )
-from vllm_omni.diffusion.cache.teacache.config import TeaCacheConfig, _MODEL_COEFFICIENTS
+from vllm_omni.diffusion.cache.teacache.config import _MODEL_COEFFICIENTS, TeaCacheConfig
 from vllm_omni.diffusion.cache.teacache.extractors import extract_wan2_2_context
 from vllm_omni.diffusion.data import DiffusionCacheConfig
 
@@ -35,6 +35,7 @@ pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_pipeline(rel_l1_thresh: float = 0.2) -> MagicMock:
     pipeline = MagicMock()
@@ -48,6 +49,7 @@ def _make_pipeline(rel_l1_thresh: float = 0.2) -> MagicMock:
 # ---------------------------------------------------------------------------
 # 1. Polynomial coefficients
 # ---------------------------------------------------------------------------
+
 
 class TestWan22Coefficients:
     """Verify WanTransformer3DModel polynomial coefficients are registered and valid."""
@@ -71,9 +73,7 @@ class TestWan22Coefficients:
         xs = np.linspace(0.0, 0.5, 50)
         ys = poly(xs)
         sign_changes = int(np.sum(np.diff(np.sign(np.diff(ys))) != 0))
-        assert sign_changes <= 3, (
-            f"Polynomial has {sign_changes} inflection points on [0, 0.5]"
-        )
+        assert sign_changes <= 3, f"Polynomial has {sign_changes} inflection points on [0, 0.5]"
 
     def test_teacache_config_uses_wan_coefficients(self):
         cfg = TeaCacheConfig(transformer_type="WanTransformer3DModel")
@@ -100,6 +100,7 @@ class TestWan22Coefficients:
 # 2. Loop state init and should_compute logic
 # ---------------------------------------------------------------------------
 
+
 class TestTeaCacheLoopState:
     """Unit tests for _teacache_init_loop_state and _teacache_should_compute."""
 
@@ -111,8 +112,7 @@ class TestTeaCacheLoopState:
     def test_init_returns_state_dict(self):
         state = _teacache_init_loop_state(_make_pipeline())
         assert state is not None
-        for key in ("config", "rescale", "acc_dist", "prev_modulated_input",
-                    "prev_noise_pred", "cnt"):
+        for key in ("config", "rescale", "acc_dist", "prev_modulated_input", "prev_noise_pred", "cnt"):
             assert key in state
 
     def test_init_acc_dist_zero(self):
@@ -183,8 +183,8 @@ class TestTeaCacheLoopState:
 # 3. enable_wan2_2_teacache
 # ---------------------------------------------------------------------------
 
-class TestEnableWan22TeaCache:
 
+class TestEnableWan22TeaCache:
     def test_attaches_tea_cache_config(self):
         pipeline = MagicMock()
         enable_wan2_2_teacache(pipeline, DiffusionCacheConfig(rel_l1_thresh=0.3))
@@ -208,6 +208,7 @@ class TestEnableWan22TeaCache:
 
     def test_wan22_pipeline_in_custom_enablers(self):
         from vllm_omni.diffusion.cache.teacache.backend import CUSTOM_TEACACHE_ENABLERS
+
         assert "Wan22Pipeline" in CUSTOM_TEACACHE_ENABLERS
         assert "Wan22I2VPipeline" in CUSTOM_TEACACHE_ENABLERS
         assert CUSTOM_TEACACHE_ENABLERS["Wan22Pipeline"] is enable_wan2_2_teacache
@@ -221,6 +222,7 @@ class TestEnableWan22TeaCache:
 # ---------------------------------------------------------------------------
 # Minimal CPU-only mock for WanTransformer3DModel
 # ---------------------------------------------------------------------------
+
 
 class _MockAdaLayerNorm(nn.Module):
     """CPU-safe AdaLayerNorm substitute: ignores scale/shift, returns input."""
@@ -258,8 +260,7 @@ class _MockConditionEmbedder(nn.Module):
         super().__init__()
         self._inner_dim = inner_dim
 
-    def forward(self, timestep_flat, encoder_hidden_states, encoder_hidden_states_image,
-                timestep_seq_len=None):
+    def forward(self, timestep_flat, encoder_hidden_states, encoder_hidden_states_image, timestep_seq_len=None):
         B = encoder_hidden_states.shape[0]
         D = self._inner_dim
         if timestep_seq_len is not None:
@@ -415,6 +416,7 @@ class TestExtractWan22Context:
 # 5. TeaCache on vs off consistency (mock denoising loop)
 # ---------------------------------------------------------------------------
 
+
 class TestTeaCacheConsistency:
     """
     Verify TeaCache produces consistent outputs with TeaCache disabled.
@@ -491,6 +493,7 @@ class TestTeaCacheConsistency:
 
     def test_first_step_always_matches(self):
         """Step 0 output must always match no-cache output."""
+
         def noise_fn(step):
             return torch.ones(1, 4, 8) * float(step)
 
