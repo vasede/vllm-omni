@@ -1254,7 +1254,9 @@ def extract_wan2_2_context(
 
         # Condition embedding: get temb and timestep_proj
         temb, timestep_proj, _, _ = module.condition_embedder(
-            timestep_flat, encoder_hidden_states, encoder_hidden_states_image,
+            timestep_flat,
+            encoder_hidden_states,
+            encoder_hidden_states_image,
             timestep_seq_len=ts_seq_len,
         )
         timestep_proj = module.timestep_proj_prepare(timestep_proj, ts_seq_len)
@@ -1263,20 +1265,14 @@ def extract_wan2_2_context(
         # WanTransformerBlock: scale_shift_table + timestep_proj -> shift/scale/gate
         if timestep_proj.ndim == 4:
             # TI2V mode: [B, seq, 6, dim]
-            shift_msa, scale_msa, *_ = (
-                block0.scale_shift_table.unsqueeze(0) + timestep_proj
-            ).chunk(6, dim=2)
+            shift_msa, scale_msa, *_ = (block0.scale_shift_table.unsqueeze(0) + timestep_proj).chunk(6, dim=2)
             shift_msa = shift_msa.squeeze(2)
             scale_msa = scale_msa.squeeze(2)
         else:
             # T2V / I2V mode: [B, 6, dim]
-            shift_msa, scale_msa, *_ = (
-                block0.scale_shift_table + timestep_proj
-            ).chunk(6, dim=1)
+            shift_msa, scale_msa, *_ = (block0.scale_shift_table + timestep_proj).chunk(6, dim=1)
 
-        norm_hidden_states = block0.norm1(
-            hidden_states_emb, scale_msa, shift_msa
-        ).type_as(hidden_states_emb)
+        norm_hidden_states = block0.norm1(hidden_states_emb, scale_msa, shift_msa).type_as(hidden_states_emb)
 
     finally:
         if _block0_is_fsdp:
