@@ -94,10 +94,7 @@ def enable_wan2_2_teacache(pipeline: Any, config: DiffusionCacheConfig) -> None:
         coefficients=config.coefficients,
     )
     pipeline._tea_cache_config = teacache_config
-    logger.info(
-        f"TeaCache enabled for {type(pipeline).__name__} "
-        f"with rel_l1_thresh={teacache_config.rel_l1_thresh}"
-    )
+    logger.info(f"TeaCache enabled for {type(pipeline).__name__} with rel_l1_thresh={teacache_config.rel_l1_thresh}")
 
 
 def _teacache_init_loop_state(pipeline: Any) -> dict | None:
