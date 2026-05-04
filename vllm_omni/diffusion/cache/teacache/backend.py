@@ -11,7 +11,6 @@ interface using the hooks-based TeaCache system.
 from typing import Any
 
 import torch
-
 from vllm.logger import init_logger
 
 from vllm_omni.diffusion.cache.base import CacheBackend
